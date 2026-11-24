@@ -1,0 +1,70 @@
+name: Publish to RubyGems
+
+# Runs when a GitHub release is published: the tests on the oldest Ruby the runner offers and on the newest, then the
+# upload to rubygems.org through Trusted Publishing (no API key is stored anywhere). The release tag must match the
+# version in lib/mygeocode/version.rb, for example v1.1.1. A version that is already on rubygems.org is left alone.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ruby: ["2.7", "3.4", "ruby"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+
+      - name: Test on Ruby ${{ matrix.ruby }}
+        run: ruby -w -W:deprecated test/run.rb
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: rubygems
+      url: https://rubygems.org/gems/mygeocode
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ruby
+
+      - name: Check that the release tag matches the version
+        run: |
+          version="$(ruby -Ilib -rmygeocode/version -e 'print MyGeocode::VERSION')"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match version ${version}"
+            exit 1
+          fi
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Skip a version that is already published
+        run: |
+          if curl -sf -A "mygeocode-ruby release workflow" "https://rubygems.org/api/v2/rubygems/mygeocode/versions/${VERSION}.json" > /dev/null; then
+            echo "SKIP=1" >> "$GITHUB_ENV"
+            echo "mygeocode ${VERSION} is already on rubygems.org, nothing to publish"
+          fi
+
+      # owner: the rubygems.org account (immutable id) that owns the gem; required for the first push through the
+      # pending trusted publisher, ignored afterwards.
+      - uses: rubygems/configure-rubygems-credentials@v2.2.0
+        if: env.SKIP != '1'
+        with:
+          owner: 256841
+
+      - name: Build and push the gem
+        if: env.SKIP != '1'
+        run: |
+          gem build mygeocode.gemspec
+          gem push "mygeocode-${VERSION}.gem"
